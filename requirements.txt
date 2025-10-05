@@ -3,3 +3,5 @@ python-dotenv
 dnspython
 fastapi
 uvicorn[standard]
+uvicorn
+gunicorn
