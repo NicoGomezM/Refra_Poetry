@@ -9,7 +9,7 @@ import 'package:home_widget/home_widget.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:math';
 
-import 'quotes_es.dart';
+// ahora las frases se obtienen desde el backend (API) que lee la BD
 
 // Función para manejar las actualizaciones del widget en segundo plano
 void backgroundCallback(Uri? uri) async {
@@ -60,26 +60,86 @@ class ThemeProvider with ChangeNotifier {
 
 // QuoteService para obtener los refranes de la API
 class QuoteService {
+  // Soporte para MongoDB Atlas Data API vía --dart-define
+  // Debes pasar estas variables en build: MONGO_DATA_API_URL, MONGO_DATA_API_KEY, MONGO_DATA_SOURCE
+  // Ejemplo:
+  // flutter build apk --release \
+  //   --dart-define=MONGO_DATA_API_URL="https://data.mongodb-api.com/app/<app-id>/endpoint/data/v1" \
+  //   --dart-define=MONGO_DATA_API_KEY="<your_api_key>" \
+  //   --dart-define=MONGO_DATA_SOURCE="Cluster0"
+  static const String _dataApiUrl = String.fromEnvironment('MONGO_DATA_API_URL', defaultValue: '');
+  static const String _dataApiKey = String.fromEnvironment('MONGO_DATA_API_KEY', defaultValue: '');
+  static const String _dataApiSource = String.fromEnvironment('MONGO_DATA_SOURCE', defaultValue: '');
+  static const String _dataApiDb = String.fromEnvironment('MONGO_DATA_API_DB', defaultValue: 'refra_poetry');
+  static const String _dataApiCollection = String.fromEnvironment('MONGO_DATA_API_COLLECTION', defaultValue: 'phrases');
+
+  // Fallback a hosts locales si no está configurada la Data API
+  static const String _apiHostFromDefine = String.fromEnvironment('API_HOST', defaultValue: '');
+  final List<String> _hosts = [
+    if (_apiHostFromDefine.isNotEmpty) _apiHostFromDefine,
+    'http://10.0.2.2:8000',
+    'http://localhost:8000',
+  ];
+
   Future<Map<String, String>> fetchQuote([String language = 'en']) async {
-    if (language == 'es') {
-      final random = Random();
-      final quote = quotes_es[random.nextInt(quotes_es.length)];
-      return {
-        'content': quote['text']!,
-        'author': quote['from']!,
-      };
+    // Si se suministró Data API URL + key + source, usar directa Data API de Atlas
+    if (_dataApiUrl.isNotEmpty && _dataApiKey.isNotEmpty && _dataApiSource.isNotEmpty) {
+      try {
+        final uri = Uri.parse('$_dataApiUrl/action/aggregate');
+        final body = json.encode({
+          'dataSource': _dataApiSource,
+          'database': _dataApiDb,
+          'collection': _dataApiCollection,
+          'pipeline': [
+            {'\u0024match': {'language': language}},
+            {'\u0024sample': {'size': 1}}
+          ]
+        });
+        final response = await http.post(uri,
+            headers: {
+              'Content-Type': 'application/json',
+              'api-key': _dataApiKey,
+            },
+            body: body).timeout(const Duration(seconds: 7));
+
+        if (response.statusCode == 200) {
+          final data = json.decode(response.body);
+          final docs = data['documents'] as List<dynamic>?;
+          if (docs != null && docs.isNotEmpty) {
+            final doc = docs.first as Map<String, dynamic>;
+            return {
+              'content': (doc['text'] ?? '') as String,
+              'author': (doc['author'] ?? 'Desconocido') as String,
+            };
+          } else {
+            throw Exception('No documents returned by Data API');
+          }
+        } else {
+          throw Exception('Data API error: ${response.statusCode} ${response.body}');
+        }
+      } catch (e) {
+        // En caso de fallo con Data API, seguimos a intentar endpoints locales
+      }
     }
-    final response = await http.get(Uri.parse('https://zenquotes.io/api/random'));
-    if (response.statusCode == 200) {
-      final data = json.decode(response.body);
-      final quoteData = data[0];
-      return {
-        'content': quoteData['q'],
-        'author': quoteData['a'],
-      };
-    } else {
-      throw Exception('Failed to load quote');
+
+    // Si no hay Data API configurada o falló, probar los hosts locales/API propia
+    for (final host in _hosts) {
+      final uri = Uri.parse('$host/quote?language=$language');
+      try {
+        final response = await http.get(uri).timeout(const Duration(seconds: 5));
+        if (response.statusCode == 200) {
+          final data = json.decode(response.body);
+          return {
+            'content': data['content'] ?? '',
+            'author': data['author'] ?? 'Desconocido',
+          };
+        }
+      } catch (e) {
+        // ignora y prueba el siguiente host
+      }
     }
+
+    throw Exception('No se pudo conectar al servidor de frases');
   }
 }
 
